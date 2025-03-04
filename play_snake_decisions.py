@@ -1,11 +1,15 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import random
 from collections import deque
 import os
 import time
 from colorama import init, Fore, Style
+import sys
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 init()
 
@@ -21,9 +25,7 @@ class DQNetwork(nn.Module):
     def __init__(self, input_size, output_size):
         super(DQNetwork, self).__init__()
         self.fc = nn.Sequential(
-            nn.Linear(input_size, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
+            nn.Linear(input_size, 32),  # Match snake_dqn_full_32.pth
             nn.ReLU(),
             nn.Linear(32, output_size),
         )
@@ -34,7 +36,7 @@ class DQNetwork(nn.Module):
 class SnakeGame:
     def __init__(self):
         self.max_dist = np.sqrt(TABLE_WIDTH ** 2 + TABLE_HEIGHT ** 2)
-        self.move_history = deque(maxlen=2)
+        self.move_history = []
         self.prev_position = None
         self.body_collisions = 0
         self.border_collisions = 0
@@ -51,7 +53,7 @@ class SnakeGame:
         self.table[self.food[0], self.food[1]] = 2
         self.food_eaten = 0
         self.steps_since_food = 0
-        self.move_history.clear()
+        self.move_history = []
         self.prev_position = None
         self.body_collisions = 0
         self.border_collisions = 0
@@ -70,7 +72,6 @@ class SnakeGame:
         snake_length_normalized = len(self.snake) / (TABLE_WIDTH * TABLE_HEIGHT)
         food_eaten_normalized = self.food_eaten / 100.0
         
-        # 8 directional danger signals
         danger = [0] * 8  # N, NE, E, SE, S, SW, W, NW
         directions = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
         for i, (dy, dx) in enumerate(directions):
@@ -106,7 +107,7 @@ class SnakeGame:
             dist_to_body2,
             dist_to_body3,
             float(tail_y < head_y)
-        ], dtype=np.float32)
+        ], dtype=np.float32)  # 29 inputs
     
     def step(self, action):
         head_y, head_x = self.snake[0]
@@ -118,7 +119,6 @@ class SnakeGame:
         
         move_info = {'action': action, 'direction': self.direction, 'new_head': new_head}
         
-        # Check rules
         if (new_head[0] >= TABLE_HEIGHT or new_head[0] < 0 or 
             new_head[1] >= TABLE_WIDTH or new_head[1] < 0):
             reward -= 1
@@ -137,9 +137,9 @@ class SnakeGame:
         
         self.snake.insert(0, new_head)
         self.steps_since_food += 1
-        reward += 0.001  # Match training per-step reward
+        reward += 0.05
         if new_head == self.food:
-            reward += 10   # Match training food reward
+            reward += 1
             self.food_eaten += 1
             self.food = self._spawn_food()
             self.steps_since_food = 0
@@ -160,61 +160,79 @@ class SnakeGame:
         
         return self._get_state(), reward, done
     
-    def render(self):
-        os.system('cls' if os.name == 'nt' else 'clear')
+    def render(self, q_values=None, valid_actions=None):
+        # Move cursor to top-left corner without clearing
+        print("\033[H", end="")
+        
+        # Render the game board
         for y in range(TABLE_HEIGHT):
+            line = ""
             for x in range(TABLE_WIDTH):
                 if (y, x) == self.snake[0]:
-                    print(f"{Fore.GREEN}S{Style.RESET_ALL}", end=" ")
+                    line += f"{Fore.GREEN}S{Style.RESET_ALL} "
                 elif (y, x) in self.snake[1:]:
-                    print(f"{Fore.GREEN}s{Style.RESET_ALL}", end=" ")
+                    line += f"{Fore.GREEN}s{Style.RESET_ALL} "
                 elif (y, x) == self.food:
-                    print(f"{Fore.RED}F{Style.RESET_ALL}", end=" ")
+                    line += f"{Fore.RED}F{Style.RESET_ALL} "
                 else:
-                    print(".", end=" ")
-            print()
+                    line += ". "
+            print(line.rstrip())
+        
+        # Display game stats
         print(f"Food Eaten: {self.food_eaten}, Steps: {self.steps_since_food}")
+        
+        # Display neuron decisions (Q-values) if provided
+        if q_values is not None and valid_actions is not None:
+            action_names = ["UP", "DOWN", "RIGHT", "LEFT"]
+            q_values_np = q_values.cpu().numpy()
+            chosen_action_idx = torch.argmax(q_values).item()
+            valid_q_values = [q_values_np[i] for i in valid_actions]
+            
+            print("\nNeuron Decisions (Q-values):")
+            q_line = ""
+            for i, (action, q_val) in enumerate(zip(action_names, q_values_np)):
+                if i in valid_actions:
+                    color = Fore.CYAN if i == chosen_action_idx else Fore.WHITE
+                    q_line += f"{color}{action}: {q_val:.4f}{Style.RESET_ALL}  "
+                else:
+                    q_line += f"{Fore.RED}{action}: {q_val:.4f}{Style.RESET_ALL}  "
+            print(q_line.rstrip())
+            
+            # Top and worst neurons among valid actions
+            if valid_q_values:
+                top_idx = valid_actions[np.argmax(valid_q_values)]
+                worst_idx = valid_actions[np.argmin(valid_q_values)]
+                print(f"Top Neuron: {action_names[top_idx]} ({q_values_np[top_idx]:.4f})")
+                print(f"Worst Neuron: {action_names[worst_idx]} ({q_values_np[worst_idx]:.4f})")
+        
+        # Flush output to ensure it displays immediately
+        sys.stdout.flush()
 
 # Load the trained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = DQNetwork(input_size=29, output_size=4).to(device)
-checkpoint_path = "models/merged_neurons.pth"
+checkpoint_path = "models/snake_dqn_full_32.pth"
 if os.path.exists(checkpoint_path):
-    # Load only the first layer weights from merged_neurons.pth
-    loaded_weights = torch.load(checkpoint_path)
-    if loaded_weights.shape == (64, 30):  # Ensure shape matches [64, 30]
-        state_dict = model.state_dict()
-        state_dict['fc.0.weight'] = loaded_weights[:, :-1]  # Shape [64, 29]
-        state_dict['fc.0.bias'] = loaded_weights[:, -1]     # Shape [64]
-        # Initialize remaining layers with appropriate methods
-        nn.init.xavier_uniform_(state_dict['fc.2.weight'])  # Shape [64, 32]
-        nn.init.zeros_(state_dict['fc.2.bias'])            # Shape [32]
-        nn.init.xavier_uniform_(state_dict['fc.4.weight'])  # Shape [32, 4]
-        nn.init.zeros_(state_dict['fc.4.bias'])            # Shape [4]
-        model.load_state_dict(state_dict)
-        print(f"Loaded merged model from {checkpoint_path} (first layer pretrained, others initialized)")
-    else:
-        print(f"Warning: Unexpected shape for merged_neurons.pth. Expected [64, 30], got {loaded_weights.shape}")
-        exit(1)
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    print(f"Loaded model from {checkpoint_path}")
 else:
     print(f"Model file {checkpoint_path} not found. Please train the model first.")
     exit(1)
 model.eval()
 
-# Play the game
+# Clear screen once at start
+os.system('cls' if os.name == 'nt' else 'clear')
+
+# Play the game with real-time neuron visualization
 game = SnakeGame()
 state = game.reset()
 total_reward = 0
 steps = 0
 
-print("\nStarting game with trained model...")
 with torch.no_grad():
     while steps < MAX_STEPS:
         state_tensor = torch.FloatTensor(state).to(device)
         q_values = model(state_tensor)
-        
-        # Enhanced debug: Print state, Q-values, and valid actions
-        print(f"Step {steps}: State={state}, Q-values={q_values.cpu().numpy()}")
         
         # Enforce Snake game rules
         opposite = {UP: DOWN, DOWN: UP, RIGHT: LEFT, LEFT: RIGHT}
@@ -222,10 +240,10 @@ with torch.no_grad():
         head_y, head_x = game.snake[0]
         valid_actions = []
         for a in range(4):
-            if a == opposite.get(current_direction):  # No reverse moves
+            if a == opposite.get(current_direction):
                 continue
             new_head = (head_y + DIRECTIONS_VECT[a][0], head_x + DIRECTIONS_VECT[a][1])
-            if game.prev_position and new_head == game.prev_position:  # No backtracking
+            if game.prev_position and new_head == game.prev_position:
                 continue
             valid_actions.append(a)
         
@@ -240,18 +258,17 @@ with torch.no_grad():
                 q_values_adjusted[a] = float('-inf')
         action = torch.argmax(q_values_adjusted).item()
         
-        # Debug: Print chosen action and valid actions
-        print(f"Chosen Action={action}, Valid Actions={valid_actions}")
-        
         next_state, reward, done = game.step(action)
         total_reward += reward
         state = next_state
         steps += 1
         
-        game.render()
-        time.sleep(0.1)
+        # Render the game with Q-values and valid actions
+        game.render(q_values, valid_actions)
+        time.sleep(0.1)  # Adjust speed
         
         if done:
             break
 
-print(f"Game Over: Total Food Eaten={game.food_eaten}, Total Reward={total_reward:.2f}, Steps={steps}, Body Collisions={game.body_collisions}, Border Collisions={game.border_collisions}")
+# Final output below the game
+print(f"\nGame Over: Total Food Eaten={game.food_eaten}, Total Reward={total_reward:.2f}, Steps={steps}, Body Collisions={game.body_collisions}, Border Collisions={game.border_collisions}")

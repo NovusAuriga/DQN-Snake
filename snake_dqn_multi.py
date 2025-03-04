@@ -36,11 +36,11 @@ class DQNetwork(nn.Module):
     def __init__(self, input_size, output_size):
         super(DQNetwork, self).__init__()
         self.fc = nn.Sequential(
-            nn.Linear(input_size, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
+            nn.Linear(input_size, 32),
             nn.ReLU(),
             nn.Linear(32, output_size),
+            #nn.ReLU(),
+            #nn.Linear(32, output_size),
         )
     
     def forward(self, x):
@@ -349,3 +349,4 @@ with torch.no_grad():
             break
 
 print(f"Test Run: Total Food Eaten={game.food_eaten}, Total Reward={total_reward:.2f}, Steps={steps}, Total Body Collisions={game.total_body_collisions}, Total Border Collisions={game.total_border_collisions}")
+
